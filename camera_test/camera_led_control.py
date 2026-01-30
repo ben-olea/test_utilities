@@ -783,8 +783,7 @@ class CameraLEDController:
             olea_detected = False
             start_time = time.time()
             while time.time() - start_time < 5:
-                # Call detect on main thread
-                #self.root.after(0, self.detect_olea_head)
+                # Call detect function
                 self.detect_olea_head()
                 time.sleep(1)
                 print(f"Checking olea_head_port: {self.olea_head_port}")

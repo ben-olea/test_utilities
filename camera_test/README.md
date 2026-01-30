@@ -1,81 +1,117 @@
-# Camera & LED Controller
+# Olea Head Controller
 
-A Python GUI application for viewing USB camera feed and controlling LEDs via serial communication.
+A Python/tkinter GUI application for testing and controlling Olea Head devices with integrated camera feed display, LED control, and automated test sequences.
 
 ## Features
 
-- Real-time camera feed display (640x480 @ ~30 FPS)
-- Serial port auto-detection and connection
-- Control 2 LEDs with ON/OFF buttons
-- Status indicators for connection and commands
+- **Host Controller Integration**: Power ON/OFF control via USB serial (VID:0x01EA PID:0xFAAA)
+- **Olea Head Control**: LED and camera enable/disable commands (VID:0x01EA PID:0x1235)
+- **Live Camera Feed**: Real-time USB camera display with DirectShow backend
+- **Image Clarity Detection**: Laplacian variance-based sharpness percentage
+- **Device Info Retrieval**: Read firmware version, hardware version, and serial number
+- **Test All Sequence**: Automated full device test with power cycling and verification
+- **Serial Traffic Log**: Real-time TX/RX monitoring for debugging
+- **Dark Theme UI**: Modern dark interface with status indicators
+
+## Requirements
+
+- Python 3.8+
+- Windows OS (uses DirectShow for camera, WMI for device enumeration)
+
+### Python Dependencies
+
+```
+opencv-python
+pillow
+pyserial
+```
 
 ## Installation
 
 1. Install Python dependencies:
 ```bash
-pip install -r requirements.txt
+pip install opencv-python pillow pyserial
 ```
 
-## Usage
-
-1. Run the application:
+2. Run the application:
 ```bash
 python camera_led_control.py
 ```
 
-2. Connect your USB camera (the app will auto-detect camera 0)
+## Building Standalone Executable
 
-3. Select your serial port from the dropdown and click "Connect"
+Run the build script to create a standalone `.exe` with no console window:
 
-4. Use the LED control buttons to send commands
+```bash
+build_exe.bat
+```
 
-## Serial Commands
+This will:
+1. Install PyInstaller and Pillow
+2. Generate a camera icon (`camera_icon.ico`)
+3. Build `Olea Head Controller.exe` in the `dist/` folder
 
-The application sends the following byte commands:
+## Hardware Requirements
 
-- `0x01` - LED 1 ON
-- `0x02` - LED 1 OFF
-- `0x03` - LED 2 ON
-- `0x04` - LED 2 OFF
+### Host Controller
+- **VID/PID**: 0x01EA / 0xFAAA
+- **Baud Rate**: 9600
+- **Commands**: ASCII text with newline terminator
+  - Power ON: `#USB:1111,1111,0000,0000\n`
+  - Power OFF: `#USB:0000,0000,0000,0000\n`
 
-## Arduino Example Code
+### Olea Head
+- **VID/PID**: 0x01EA / 0x1235
+- **Baud Rate**: 115200
+- **Protocol**: Binary commands with ctypes structures
 
-If you're using an Arduino to control the LEDs, here's sample code to receive the commands:
+#### Commands
 
-```cpp
-const int LED1_PIN = 9;
-const int LED2_PIN = 10;
+| Command | Byte | Description |
+|---------|------|-------------|
+| LED Enable | 0x02 | Enable/disable LED (uint16 payload) |
+| Camera Enable | 0x03 | Enable/disable camera (uint16 payload) |
+| LED Config | 0x04 | Configure LED brightness/frequency |
+| Device Info | 0x05 | Read device information |
 
-void setup() {
-  Serial.begin(9600);
-  pinMode(LED1_PIN, OUTPUT);
-  pinMode(LED2_PIN, OUTPUT);
-}
+### USB Camera
+- Must contain "USB CAMERA" in device name (WMI enumeration)
+- DirectShow compatible
 
-void loop() {
-  if (Serial.available() > 0) {
-    byte command = Serial.read();
+## Test All Sequence
 
-    switch(command) {
-      case 0x01:  // LED 1 ON
-        digitalWrite(LED1_PIN, HIGH);
-        break;
-      case 0x02:  // LED 1 OFF
-        digitalWrite(LED1_PIN, LOW);
-        break;
-      case 0x03:  // LED 2 ON
-        digitalWrite(LED2_PIN, HIGH);
-        break;
-      case 0x04:  // LED 2 OFF
-        digitalWrite(LED2_PIN, LOW);
-        break;
-    }
-  }
-}
+The "Test All" button runs an automated 9-step test:
+
+1. **Power OFF** - Send power off to Host Controller
+2. **Power ON** - Send power on, wait 3 seconds
+3. **Detect Olea Head** - 5 second timeout for device enumeration
+4. **Get Device Info** - Read and display firmware/hardware info
+5. **LED ON** - Enable LEDs with default configuration
+6. **Camera ON** - Send camera enable command
+7. **Detect USB Camera** - 10 second timeout for camera enumeration
+8. **Capture Snapshot** - Take image, display with clarity percentage
+9. **Cleanup** - Turn off camera, LED, and power
+
+## Project Structure
+
+```
+camera_test/
+├── camera_led_control.py   # Main application
+├── create_icon.py          # Icon generator script
+├── build_exe.bat           # Build script for executable
+├── camera_icon.ico         # Application icon (generated)
+├── .gitignore
+└── README.md
 ```
 
 ## Troubleshooting
 
-- **Camera not opening**: Make sure no other application is using the camera
-- **Serial port not found**: Check device manager and ensure drivers are installed
-- **Connection failed**: Verify baud rate (9600) matches your device settings
+- **Host Controller not found**: Verify USB connection and VID/PID (0x01EA/0xFAAA)
+- **Olea Head not detected**: Check USB connection, ensure device is powered
+- **Camera not opening**: Close other applications using the camera
+- **App hanging on detect**: Serial timeout issues - device may not be responding
+- **No USB Camera found**: Camera must have "USB CAMERA" in its WMI device name
+
+## License
+
+Internal use.
