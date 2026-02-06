@@ -50,7 +50,7 @@ class CameraLEDController:
     def __init__(self, root):
         self.root = root
         self.root.title("Olea Head Controller")
-        self.root.geometry("1100x820")
+        self.root.geometry("1200x1000")
 
         # Host controller connection
         self.host_controller_conn = None
@@ -69,9 +69,9 @@ class CameraLEDController:
         self.HEAD_CMD_LED_CONFIG = 0x04
         self.HEAD_CMD_DEVICE_INFO = 0x05
 
-        # Camera
-        self.camera = None
+        # Camera capture state
         self.camera_running = False
+        self.camera = None
 
         # Available cameras list
         self.available_cameras = []
@@ -228,7 +228,7 @@ class CameraLEDController:
         camera_frame.columnconfigure(0, weight=1)
         camera_frame.rowconfigure(0, weight=1)
 
-        self.camera_label = tk.Label(camera_frame, bg='#1e1e1e', borderwidth=2, relief='solid')
+        self.camera_label = tk.Label(camera_frame, bg='#1e1e1e', borderwidth=2, relief='solid', width=640, height=480)
         self.camera_label.grid(row=0, column=0)
 
         # Info row with timestamp and clarity
@@ -305,25 +305,12 @@ class CameraLEDController:
         all_camera_names = self.get_all_camera_devices()
         print(f"All camera devices found: {all_camera_names}")
 
-        # Test camera indices 0-9 using DirectShow and match with WMI names
-        detected_cameras = []
-        for i in range(len(all_camera_names)):
-            #cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            #if cap.isOpened():
-             #   cap.release()
-                # Get device name from WMI list if available
-            cam_name = all_camera_names[len(detected_cameras)] if len(detected_cameras) < len(all_camera_names) else f"Camera {i}"
-            detected_cameras.append({
-                'index': i,
-                'name': cam_name
-            })
-            print(f"Detected camera at index {i}: {cam_name}")
-
-        # Filter to only include cameras with "USB Camera" in the name
-        for cam in detected_cameras:
-            if "USB CAMERA" in cam['name']:
-                self.available_cameras.append(cam)
-                print(f"Added USB Camera: {cam['name']} at index {cam['index']}")
+        # Match USB cameras by name and assign index based on WMI order
+        for i, cam_name in enumerate(all_camera_names):
+            print(f"Camera at index {i}: {cam_name}")
+            if "USB CAMERA" in cam_name.upper():
+                self.available_cameras.append({'index': i, 'name': cam_name})
+                print(f"Added USB Camera: {cam_name} at index {i}")
 
         camera_list = [cam['name'] for cam in self.available_cameras]
         self.camera_combo['values'] = camera_list
@@ -343,7 +330,7 @@ class CameraLEDController:
             self.btn_cam_stop.config(state='disabled')
 
     def start_selected_camera(self):
-        """Start the camera selected in the dropdown"""
+        """Capture a single image from the camera selected in the dropdown"""
         if not self.available_cameras:
             messagebox.showerror("Error", "No cameras available!")
             return
@@ -354,14 +341,6 @@ class CameraLEDController:
             return
 
         camera_index = self.available_cameras[selection_idx]['index']
-
-        # Stop existing camera if running
-        if self.camera_running:
-            self.camera_running = False
-            if self.camera:
-                self.camera.release()
-                self.camera = None
-
         self.start_camera(camera_index)
 
     def detect_host_controller(self):
@@ -408,8 +387,9 @@ class CameraLEDController:
             if response:
                 self.log_serial("HOST", "rx", response.decode('utf-8', errors='replace').strip())
             self.status_var.set("Host Controller: Power ON sent")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to send command: {str(e)}")
+        except Exception:
+            self.detect_host_controller()
+            self.status_var.set("Power ON failed, re-detecting host controller")
 
     def host_power_off(self):
         """Send power off command to host controller"""
@@ -426,8 +406,22 @@ class CameraLEDController:
             if response:
                 self.log_serial("HOST", "rx", response.decode('utf-8', errors='replace').strip())
             self.status_var.set("Host Controller: Power OFF sent")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to send command: {str(e)}")
+
+            # Reset Olea Head to not detected
+            self.olea_head_port = None
+            self.olea_status_label.config(text="Not Detected", foreground="#f44336")
+            self.olea_device_label.config(text="VID:0x01EA PID:0x1235")
+            self.btn_led_on.config(state='disabled')
+            self.btn_led_off.config(state='disabled')
+            self.btn_cam_on.config(state='disabled')
+            self.btn_cam_off.config(state='disabled')
+            self.btn_get_info.config(state='disabled')
+
+            # Reset camera to not detected
+            self.reset_camera_state()
+        except Exception:
+            self.detect_host_controller()
+            self.status_var.set("Power OFF failed, re-detecting host controller")
 
     def detect_olea_head(self):
         """Detect Olea Head by VID/PID and verify with get_info command"""
@@ -486,6 +480,7 @@ class CameraLEDController:
         self.btn_cam_on.config(state='disabled')
         self.btn_cam_off.config(state='disabled')
         self.btn_get_info.config(state='disabled')
+        self.reset_camera_state()
         self.status_var.set("Olea Head not found")
 
     def olea_send_command(self, cmd_byte, write=False, data=None, retries=3):
@@ -501,7 +496,6 @@ class CameraLEDController:
             self.status_var.set("Error: Olea Head not detected")
             return None
 
-        last_error = None
         for attempt in range(retries):
             conn = None
             try:
@@ -524,8 +518,7 @@ class CameraLEDController:
                 # Store connection temporarily for read operations
                 self.olea_head_conn = conn
                 return True
-            except Exception as e:
-                last_error = e
+            except Exception:
                 if conn and conn.is_open:
                     try:
                         conn.close()
@@ -535,8 +528,9 @@ class CameraLEDController:
                 if attempt < retries - 1:
                     time.sleep(1)
 
-        # All retries failed
-        self.status_var.set(f"Error: Failed after {retries} attempts - {last_error}")
+        # All retries failed - re-detect Olea Head
+        self.detect_olea_head()
+        self.status_var.set(f"Command failed after {retries} attempts, re-detecting Olea Head")
         return None
 
     def olea_close_connection(self):
@@ -572,6 +566,8 @@ class CameraLEDController:
         if self.olea_send_command(self.HEAD_CMD_CAMERA_EN, write=True, data=data):
             state = "ON" if enable else "OFF"
             self.status_var.set(f"Olea Head: Camera {state}")
+            if not enable:
+                self.reset_camera_state()
         self.olea_close_connection()
 
     def get_hardware_revision_str(self, val):
@@ -647,46 +643,47 @@ class CameraLEDController:
                 conn.close()
 
     def start_camera(self, camera_index=0):
-        """Start the camera feed with the specified camera index"""
+        """Open camera and start capturing images every second"""
+        # Stop existing camera if running
+        if self.camera and self.camera.isOpened():
+            self.camera.release()
+
         self.camera = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not self.camera.isOpened():
             messagebox.showerror("Error", f"Could not open camera {camera_index}!")
             self.status_var.set("Camera not available")
             self.camera_status_label.config(text="Failed", foreground="#f44336")
+            self.camera = None
             return
+
+        # Set camera resolution to 640x480
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
         self.camera_running = True
         self.camera_status_label.config(text="Running", foreground="#4caf50")
         self.status_var.set(f"Camera {camera_index} started")
-        self.update_camera_feed()
+        self.capture_image()
 
-    def stop_camera(self):
-        """Stop the camera feed"""
-        self.camera_running = False
-        if self.camera:
-            self.camera.release()
-            self.camera = None
-        self.camera_status_label.config(text="Stopped", foreground="#f44336")
-        self.status_var.set("Camera stopped")
-
-    def update_camera_feed(self):
-        """Update the camera feed in the GUI"""
-        if not self.camera_running:
+    def capture_image(self):
+        """Capture a single image and schedule the next capture"""
+        if not self.camera_running or not self.camera:
             return
 
         ret, frame = self.camera.read()
-        if not ret:
-            # Stop camera on read error
-            self.camera_running = False
-            if self.camera:
-                self.camera.release()
-                self.camera = None
+        if not ret or frame is None:
             self.camera_status_label.config(text="Error", foreground="#f44336")
-            self.status_var.set("Camera feed error - stopped")
+            self.status_var.set("Failed to capture image")
+            self.camera_running = False
             return
 
-        # Resize frame to fit in window (640x480)
-        frame = cv2.resize(frame, (640, 480))
+        # Verify frame size and resize preserving aspect ratio
+        h, w = frame.shape[:2]
+        if w != 640 or h != 480:
+            scale = min(640 / w, 480 / h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            frame = cv2.resize(frame, (new_w, new_h))
 
         # Update timestamp label
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -695,25 +692,44 @@ class CameraLEDController:
         # Calculate image clarity using Laplacian variance
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        # Normalize to 0-100% (threshold of 500 for max sharpness)
         clarity_pct = min(100, (laplacian_var / 500) * 100)
         self.clarity_label.config(text=f"Clarity: {clarity_pct:.1f}%")
 
-        # Convert BGR to RGB
+        # Convert BGR to RGB and display
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # Convert to PIL Image
         img = Image.fromarray(frame_rgb)
-
-        # Convert to PhotoImage
         photo = ImageTk.PhotoImage(image=img)
-
-        # Update label
         self.camera_label.config(image=photo)
         self.camera_label.image = photo
 
-        # Schedule next update
-        self.root.after(1000, self.update_camera_feed)  # ~1 FPS
+        # Schedule next capture in 1 second
+        if self.camera_running:
+            self.root.after(100, self.capture_image)
+
+    def reset_camera_state(self):
+        """Reset camera UI to not detected state"""
+        self.camera_running = False
+        if self.camera and self.camera.isOpened():
+            self.camera.release()
+        self.camera = None
+        self.available_cameras = []
+        self.camera_combo['values'] = []
+        self.camera_combo.set('')
+        self.camera_detected_label.config(text="Not Detected", foreground="#f44336")
+        self.camera_status_label.config(text="", foreground="#f44336")
+        self.btn_cam_start.config(state='disabled')
+        self.btn_cam_stop.config(state='disabled')
+        self.timestamp_label.config(text="")
+        self.clarity_label.config(text="")
+
+    def stop_camera(self):
+        """Stop the periodic camera capture and release device"""
+        self.camera_running = False
+        if self.camera and self.camera.isOpened():
+            self.camera.release()
+        self.camera = None
+        self.camera_status_label.config(text="Stopped", foreground="#f44336")
+        self.status_var.set("Camera stopped")
 
     def start_test_all(self):
         """Start the full test sequence in a background thread"""
@@ -888,12 +904,20 @@ class CameraLEDController:
                     self.test_log("  Failed to open camera", "FAIL")
                     self.test_cleanup()
                     return
-                time.sleep(1)  # Let camera warm up
+                # Set camera resolution to 640x480
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
                 # Take two frames, use the second one (better exposure/focus)
                 cap.read()  # Discard first frame
+
                 ret, frame = cap.read()  # Use second frame
                 cap.release()
                 if ret and frame is not None:
+                    h, w = frame.shape[:2]
+                    self.test_log(f"  Frame size: {w}x{h}")
+                    if w != 640 or h != 480:
+                        self.test_log(f"  WARNING: Frame is not 640x480", "FAIL")
                     # Display snapshot on UI
                     self.display_test_snapshot(frame)
                     self.test_log("  Snapshot displayed", "OK")
@@ -921,8 +945,12 @@ class CameraLEDController:
 
     def display_test_snapshot(self, frame):
         """Display a snapshot on the camera feed UI with timestamp and clarity (thread-safe)"""
-        # Resize frame
-        frame_resized = cv2.resize(frame, (640, 480))
+        # Resize frame preserving aspect ratio
+        h, w = frame.shape[:2]
+        scale = min(640 / w, 480 / h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        frame_resized = cv2.resize(frame, (new_w, new_h))
 
         # Calculate clarity
         gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
@@ -983,9 +1011,9 @@ class CameraLEDController:
     def cleanup(self):
         """Cleanup resources before closing"""
         self.camera_running = False
-
-        if self.camera:
+        if self.camera and self.camera.isOpened():
             self.camera.release()
+        self.camera = None
 
         if self.host_controller_conn and self.host_controller_conn.is_open:
             self.host_controller_conn.close()
