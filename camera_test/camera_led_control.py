@@ -448,6 +448,10 @@ class CameraLEDController:
                 print(f"Testing port {port.device}, received {len(response)} bytes. excpected {ctypes.sizeof(device_info_t)} bytes.")
 
                 if len(response) >= ctypes.sizeof(device_info_t):
+                    # print the device name from the response for debugging
+                    c_info = device_info_t.from_buffer_copy(response)
+                    print(f"Received device info response: device_name={c_info.device_name}, firmware_version={c_info.firmware_version_major}.{c_info.firmware_version_minor}.{c_info.firmware_version_patch}, serial_number={(c_info.serial_number_h << 64) | c_info.serial_number_l:x}, hardware_version={c_info.hardware_version}")
+
                     print(f'Olea head found on port {port.device}')
                     # Got valid response - this is the correct port
                     conn.close()
