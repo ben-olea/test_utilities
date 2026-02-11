@@ -7,8 +7,7 @@ from PIL import Image, ImageTk
 import serial
 import serial.tools.list_ports
 import ctypes
-import subprocess
-import threading
+from pygrabber.dshow_graph import FilterGraph
 from datetime import datetime
 
 
@@ -38,7 +37,8 @@ class led_config_t(ctypes.Structure):
     @staticmethod
     def led_config_all():
         """Create default LED config: 1000Hz frequency, 50 brightness for all 25 LEDs"""
-        brightness_array = (ctypes.c_uint8 * 25)(*([50] * 25))
+        brightness_array = (ctypes.c_uint8 * 25)(*[0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50])
+        
         return led_config_t(
             ramp_time_ms=0,
             frequency=1000,
@@ -49,7 +49,7 @@ class led_config_t(ctypes.Structure):
 class CameraLEDController:
     def __init__(self, root):
         self.root = root
-        self.root.title("Olea Head Controller")
+        self.root.title("Olea Head Controller - Version 1.0")
         self.root.geometry("1200x1000")
 
         # Host controller connection
@@ -282,50 +282,36 @@ class CameraLEDController:
         """Clear the serial traffic log"""
         self.serial_log.delete(1.0, tk.END)
 
-    def get_all_camera_devices(self):
-        """Get list of all video input devices using WMI"""
-        cameras = []
-        try:
-            # Query WMI for all video input devices (imaging devices)
-            cmd = 'powershell -Command "Get-WmiObject Win32_PnPEntity | Where-Object { $_.PNPClass -eq \'Camera\' -or $_.PNPClass -eq \'Image\' } | Select-Object -ExpandProperty Name"'
-            result = subprocess.run(cmd, capture_output=True, text=True, shell=True, timeout=5)
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    if line.strip():
-                        cameras.append(line.strip())
-        except Exception:
-            pass
-        return cameras
-
     def refresh_cameras(self):
-        """Refresh the list of available cameras, filtering for USB Camera devices"""
+        """Detect connected video devices using DirectShow via pygrabber"""
         self.available_cameras = []
 
-        # Get all camera device names from WMI
-        all_camera_names = self.get_all_camera_devices()
-        print(f"All camera devices found: {all_camera_names}")
+        try:
+            fg = FilterGraph()
+            device_names = fg.get_input_devices()
+            for i, name in enumerate(device_names):
+                self.available_cameras.append({'index': i, 'name': name})
+        except Exception as e:
+            print(f"pygrabber enumeration failed: {e}")
 
-        # Match USB cameras by name and assign index based on WMI order
-        for i, cam_name in enumerate(all_camera_names):
-            print(f"Camera at index {i}: {cam_name}")
-            if "USB CAMERA" in cam_name.upper():
-                self.available_cameras.append({'index': i, 'name': cam_name})
-                print(f"Added USB Camera: {cam_name} at index {i}")
-
-        camera_list = [cam['name'] for cam in self.available_cameras]
+        camera_list = [f"[{cam['index']}] {cam['name']}" for cam in self.available_cameras]
         self.camera_combo['values'] = camera_list
 
         if camera_list:
-            self.camera_combo.current(0)
+            # Default to first USB CAMERA if found, otherwise first camera
+            default_idx = 0
+            for i, cam in enumerate(self.available_cameras):
+                if "USB CAMERA" in cam['name'].upper():
+                    default_idx = i
+                    break
+            self.camera_combo.current(default_idx)
             self.camera_detected_label.config(text="Detected", foreground="#4caf50")
-            self.status_var.set(f"Found {len(camera_list)} USB Camera(s)")
-            # Enable camera buttons
+            self.status_var.set(f"Found {len(camera_list)} camera(s)")
             self.btn_cam_start.config(state='normal')
             self.btn_cam_stop.config(state='normal')
         else:
             self.camera_detected_label.config(text="Not Detected", foreground="#f44336")
-            self.status_var.set("No USB Camera found")
-            # Disable camera buttons
+            self.status_var.set("No cameras found")
             self.btn_cam_start.config(state='disabled')
             self.btn_cam_stop.config(state='disabled')
 
@@ -736,7 +722,7 @@ class CameraLEDController:
         self.status_var.set("Camera stopped")
 
     def start_test_all(self):
-        """Start the full test sequence in a background thread"""
+        """Start the full test sequence"""
         self.btn_test_all.config(state='disabled')
         self.device_info_text.delete(1.0, tk.END)
         self.device_info_text.insert(tk.END, "=== TEST ALL SEQUENCE ===\n\n")
@@ -745,20 +731,18 @@ class CameraLEDController:
         self.camera_label.image = None
         self.timestamp_label.config(text="")
         self.clarity_label.config(text="")
-        thread = threading.Thread(target=self.test_all_sequence, daemon=True)
-        thread.start()
+        self.test_all_sequence()
 
     def test_log(self, message, status=None):
-        """Log a message to device info panel (thread-safe)"""
-        def update():
-            if status == "OK":
-                self.device_info_text.insert(tk.END, f"{message} ... OK\n")
-            elif status == "FAIL":
-                self.device_info_text.insert(tk.END, f"{message} ... FAIL\n")
-            else:
-                self.device_info_text.insert(tk.END, f"{message}\n")
-            self.device_info_text.see(tk.END)
-        self.root.after(0, update)
+        """Log a message to device info panel"""
+        if status == "OK":
+            self.device_info_text.insert(tk.END, f"{message} ... OK\n")
+        elif status == "FAIL":
+            self.device_info_text.insert(tk.END, f"{message} ... FAIL\n")
+        else:
+            self.device_info_text.insert(tk.END, f"{message}\n")
+        self.device_info_text.see(tk.END)
+        self.root.update()
 
     def test_all_sequence(self):
         """Run the full test sequence"""
@@ -884,10 +868,10 @@ class CameraLEDController:
             camera_index = None
             start_time = time.time()
             while time.time() - start_time < 10:
-                all_camera_names = self.get_all_camera_devices()
-                for i, name in enumerate(all_camera_names):
-                    if "USB CAMERA" in name:
-                        camera_index = i
+                self.refresh_cameras()
+                for cam in self.available_cameras:
+                    if "USB CAMERA" in cam['name'].upper():
+                        camera_index = cam['index']
                         camera_detected = True
                         break
                 if camera_detected:
@@ -945,10 +929,10 @@ class CameraLEDController:
             self.test_log(f"\nUnexpected error: {e}", "FAIL")
             self.test_cleanup()
         finally:
-            self.root.after(0, lambda: self.btn_test_all.config(state='normal'))
+            self.btn_test_all.config(state='normal')
 
     def display_test_snapshot(self, frame):
-        """Display a snapshot on the camera feed UI with timestamp and clarity (thread-safe)"""
+        """Display a snapshot on the camera feed UI with timestamp and clarity"""
         # Resize frame preserving aspect ratio
         h, w = frame.shape[:2]
         scale = min(640 / w, 480 / h)
@@ -970,16 +954,12 @@ class CameraLEDController:
         # Get timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        def update_ui():
-            # Convert to PhotoImage
-            photo = ImageTk.PhotoImage(image=img)
-            self.camera_label.config(image=photo)
-            self.camera_label.image = photo
-            # Update labels
-            self.timestamp_label.config(text=timestamp)
-            self.clarity_label.config(text=f"Clarity: {clarity_pct:.1f}%")
-
-        self.root.after(0, update_ui)
+        photo = ImageTk.PhotoImage(image=img)
+        self.camera_label.config(image=photo)
+        self.camera_label.image = photo
+        self.timestamp_label.config(text=timestamp)
+        self.clarity_label.config(text=f"Clarity: {clarity_pct:.1f}%")
+        self.root.update()
 
     def test_cleanup(self, show_log=False):
         """Cleanup after test - turn off camera, LED, and power"""
