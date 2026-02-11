@@ -38,7 +38,18 @@ class led_config_t(ctypes.Structure):
     def led_config_all():
         """Create default LED config: 1000Hz frequency, 50 brightness for all 25 LEDs"""
         brightness_array = (ctypes.c_uint8 * 25)(*[0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50])
-        
+
+        return led_config_t(
+            ramp_time_ms=0,
+            frequency=1000,
+            brightness=brightness_array
+        )
+
+    @staticmethod
+    def led_config_bar_only():
+        """Create LED config with only bar LEDs (first 9) at 50 brightness"""
+        brightness_array = (ctypes.c_uint8 * 25)(*[50, 50, 50, 50, 50, 50, 50, 50, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
         return led_config_t(
             ramp_time_ms=0,
             frequency=1000,
@@ -186,8 +197,11 @@ class CameraLEDController:
         self.btn_get_info = ttk.Button(olea_frame, text="Get Info", command=self.olea_cmd_get_info, width=10, state='disabled')
         self.btn_get_info.grid(row=1, column=2, rowspan=2, padx=5, pady=5)
 
+        self.btn_led_bar = ttk.Button(olea_frame, text="LED Bar", command=self.olea_cmd_led_bar, width=10, state='disabled')
+        self.btn_led_bar.grid(row=1, column=3, rowspan=2, padx=5, pady=5)
+
         self.btn_test_all = ttk.Button(olea_frame, text="Test All", command=self.start_test_all, width=10)
-        self.btn_test_all.grid(row=1, column=3, rowspan=2, padx=5, pady=5)
+        self.btn_test_all.grid(row=1, column=4, rowspan=2, padx=5, pady=5)
 
         # Row 3: Camera selection
         ttk.Label(olea_frame, text="Camera:").grid(row=3, column=0, padx=5, pady=(5, 0))
@@ -402,6 +416,7 @@ class CameraLEDController:
             self.btn_cam_on.config(state='disabled')
             self.btn_cam_off.config(state='disabled')
             self.btn_get_info.config(state='disabled')
+            self.btn_led_bar.config(state='disabled')
 
             # Reset camera to not detected
             self.reset_camera_state()
@@ -451,6 +466,7 @@ class CameraLEDController:
                     self.btn_cam_on.config(state='normal')
                     self.btn_cam_off.config(state='normal')
                     self.btn_get_info.config(state='normal')
+                    self.btn_led_bar.config(state='normal')
                     return
             except Exception:
                 return False
@@ -470,6 +486,7 @@ class CameraLEDController:
         self.btn_cam_on.config(state='disabled')
         self.btn_cam_off.config(state='disabled')
         self.btn_get_info.config(state='disabled')
+        self.btn_led_bar.config(state='disabled')
         self.reset_camera_state()
         self.status_var.set("Olea Head not found")
 
@@ -547,6 +564,19 @@ class CameraLEDController:
         if self.olea_send_command(self.HEAD_CMD_LED_EN, write=True, data=data):
             state = "ON" if enable else "OFF"
             self.status_var.set(f"Olea Head: LED {state}")
+        self.olea_close_connection()
+
+    def olea_cmd_led_bar(self):
+        """Send bar-only LED config and enable LEDs"""
+        config = led_config_t.led_config_bar_only()
+        config_data = bytes(config)
+        if not self.olea_send_command(self.HEAD_CMD_LED_CONFIG, write=True, data=config_data):
+            return
+        self.olea_close_connection()
+
+        data = (1).to_bytes(2, 'little')
+        if self.olea_send_command(self.HEAD_CMD_LED_EN, write=True, data=data):
+            self.status_var.set("Olea Head: LED Bar ON")
         self.olea_close_connection()
 
     def olea_cmd_camera_en(self, enable):
