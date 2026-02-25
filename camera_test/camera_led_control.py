@@ -1,7 +1,11 @@
 import json
+import os
+import sys
 import time
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+from urllib.request import urlopen, Request
 import cv2
 from PIL import Image, ImageTk
 import serial
@@ -9,6 +13,73 @@ import serial.tools.list_ports
 import ctypes
 from pygrabber.dshow_graph import FilterGraph
 from datetime import datetime
+
+APP_VERSION = "1.0.1"
+GITHUB_REPO = "ben-olea/test_utilities"
+GITHUB_ASSET_NAME = "Olea Head Controller.exe"
+
+
+def check_for_update():
+    """Check GitHub releases for a newer version. Returns (new_version, download_url) or None."""
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        req = Request(url, headers={"Accept": "application/vnd.github+json"})
+        with urlopen(req, timeout=5) as resp:
+            release = json.loads(resp.read().decode())
+
+        tag = release.get("tag_name", "").lstrip("v")
+        if not tag:
+            return None
+
+        # Compare version tuples
+        current = tuple(int(x) for x in APP_VERSION.split("."))
+        latest = tuple(int(x) for x in tag.split("."))
+        if latest <= current:
+            return None
+
+        # Find the exe asset
+        for asset in release.get("assets", []):
+            if asset["name"] == GITHUB_ASSET_NAME:
+                return (tag, asset["browser_download_url"])
+
+        return None
+    except Exception:
+        return None
+
+
+def apply_update(download_url, progress_callback=None):
+    """Download new exe and replace the current one. Returns True on success."""
+    try:
+        current_exe = sys.executable
+        new_exe = current_exe + ".update"
+
+        req = Request(download_url)
+        with urlopen(req, timeout=120) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            with open(new_exe, "wb") as f:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total:
+                        progress_callback(downloaded / total)
+
+        # Rename current exe to .old, move new into place
+        old_exe = current_exe + ".old"
+        if os.path.exists(old_exe):
+            os.remove(old_exe)
+        os.rename(current_exe, old_exe)
+        os.rename(new_exe, current_exe)
+        return True
+    except Exception:
+        # Clean up partial download
+        new_exe = sys.executable + ".update"
+        if os.path.exists(new_exe):
+            os.remove(new_exe)
+        return False
 
 
 class device_info_t(ctypes.Structure):
@@ -60,7 +131,7 @@ class led_config_t(ctypes.Structure):
 class CameraLEDController:
     def __init__(self, root):
         self.root = root
-        self.root.title("Olea Head Controller - Version 1.0")
+        self.root.title(f"Olea Head Controller - Version {APP_VERSION}")
         self.root.geometry("1200x1000")
 
         # Host controller connection
@@ -1059,7 +1130,77 @@ class CameraLEDController:
         cv2.destroyAllWindows()
 
 
+def _do_update(root, download_url, new_version):
+    """Show progress window, download update, and restart."""
+    win = tk.Toplevel(root)
+    win.title("Updating...")
+    win.geometry("350x100")
+    win.resizable(False, False)
+    win.grab_set()
+
+    label = tk.Label(win, text=f"Downloading v{new_version}...")
+    label.pack(pady=(15, 5))
+    progress = ttk.Progressbar(win, length=300, mode="determinate")
+    progress.pack(pady=5)
+
+    def download():
+        def on_progress(pct):
+            root.after(0, lambda: progress.configure(value=pct * 100))
+
+        success = apply_update(download_url, progress_callback=on_progress)
+
+        def finish():
+            win.destroy()
+            if success:
+                messagebox.showinfo("Update Complete",
+                                    f"Updated to v{new_version}.\nThe application will now restart.")
+                # Restart the exe
+                os.startfile(sys.executable)
+                root.destroy()
+            else:
+                messagebox.showerror("Update Failed",
+                                     "Could not download the update. Please try again later.")
+
+        root.after(0, finish)
+
+    threading.Thread(target=download, daemon=True).start()
+
+
+def _check_update_background(root):
+    """Run update check in background thread, prompt user on main thread if update found."""
+    def check():
+        # Only check when running as a frozen exe
+        if not getattr(sys, "frozen", False):
+            return
+        result = check_for_update()
+        if result:
+            new_version, download_url = result
+            root.after(0, lambda: _prompt_update(root, new_version, download_url))
+
+    threading.Thread(target=check, daemon=True).start()
+
+
+def _prompt_update(root, new_version, download_url):
+    """Ask user if they want to update."""
+    answer = messagebox.askyesno(
+        "Update Available",
+        f"A new version (v{new_version}) is available.\n"
+        f"You are running v{APP_VERSION}.\n\n"
+        "Would you like to update now?")
+    if answer:
+        _do_update(root, download_url, new_version)
+
+
 def main():
+    # Clean up .old file from a previous update
+    if getattr(sys, "frozen", False):
+        old_exe = sys.executable + ".old"
+        if os.path.exists(old_exe):
+            try:
+                os.remove(old_exe)
+            except Exception:
+                pass
+
     root = tk.Tk()
     app = CameraLEDController(root)
 
@@ -1069,6 +1210,10 @@ def main():
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
+
+    # Check for updates after the window is shown
+    root.after(1000, lambda: _check_update_background(root))
+
     root.mainloop()
 
 
