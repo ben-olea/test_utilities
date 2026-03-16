@@ -1,3 +1,6 @@
 .venv
 build/
 camera_test/build/
+*claude/
+*.zip
+*.exe

@@ -22,7 +22,7 @@ if not exist camera_icon.ico (
 
 REM Build the executable with no console window and icon
 echo Building executable...
-python -m PyInstaller --onefile --noconsole --icon=camera_icon.ico --name "Olea Head Controller" camera_led_control.py
+python -m PyInstaller --onefile --noconsole --icon=camera_icon.ico --name "Olea_Head_Controller" camera_led_control.py
 
 echo.
 echo Build complete! Executable is in the 'dist' folder.

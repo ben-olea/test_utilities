@@ -13,10 +13,11 @@ import serial.tools.list_ports
 import ctypes
 from pygrabber.dshow_graph import FilterGraph
 from datetime import datetime
+import supabase as sb
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "2.0.0"
 GITHUB_REPO = "ben-olea/test_utilities"
-GITHUB_ASSET_NAME = "Olea Head Controller.exe"
+GITHUB_ASSET_NAME = "Olea_Head_Controller.exe"
 
 
 def check_for_update():
@@ -28,13 +29,16 @@ def check_for_update():
             release = json.loads(resp.read().decode())
 
         tag = release.get("tag_name", "").lstrip("v")
+        print(f"Latest GitHub release version: {tag}")
         if not tag:
             return None
 
         # Compare version tuples
         current = tuple(int(x) for x in APP_VERSION.split("."))
         latest = tuple(int(x) for x in tag.split("."))
+        print(f"Current version: {current}, Latest version: {latest}")
         if latest <= current:
+            print("No update needed.")
             return None
 
         # Find the exe asset
@@ -43,12 +47,17 @@ def check_for_update():
                 return (tag, asset["browser_download_url"])
 
         return None
-    except Exception:
+    except Exception as e:
+        print(f"Update check failed: {e}")
+
         return None
 
 
 def apply_update(download_url, progress_callback=None):
     """Download new exe and replace the current one. Returns True on success."""
+    if not getattr(sys, "frozen", False):
+        print("apply_update: not running as frozen exe, aborting")
+        return False
     try:
         current_exe = sys.executable
         new_exe = current_exe + ".update"
@@ -164,6 +173,9 @@ class CameraLEDController:
         # Setup UI
         self.setup_ui()
 
+        # Update bundle in background on startup
+        threading.Thread(target=self.update_bundle, daemon=True).start()
+
     def configure_dark_theme(self):
         """Configure dark theme for the application"""
         # Dark color scheme
@@ -254,6 +266,9 @@ class CameraLEDController:
         self.olea_status_label = ttk.Label(olea_frame, text="Not Connected", foreground="#f44336")
         self.olea_status_label.grid(row=0, column=3, padx=10)
 
+        self.btn_test_all = ttk.Button(olea_frame, text="Test All", command=self.start_test_all, width=10)
+        self.btn_test_all.grid(row=0, column=4, padx=5)
+
         # Row 1-2: Commands (stacked)
         self.btn_led_on = ttk.Button(olea_frame, text="LED ON", command=lambda: self.olea_cmd_led_en(True), width=10, state='disabled')
         self.btn_led_on.grid(row=1, column=0, padx=5, pady=(5, 0))
@@ -271,8 +286,8 @@ class CameraLEDController:
         self.btn_led_bar = ttk.Button(olea_frame, text="LED Bar", command=self.olea_cmd_led_bar, width=10, state='disabled')
         self.btn_led_bar.grid(row=1, column=3, rowspan=2, padx=5, pady=5)
 
-        self.btn_test_all = ttk.Button(olea_frame, text="Test All", command=self.start_test_all, width=10)
-        self.btn_test_all.grid(row=1, column=4, rowspan=2, padx=5, pady=5)
+        self.btn_update_fw = ttk.Button(olea_frame, text="Update Firmware", command=self.flash_firmware, width=15, state='disabled')
+        self.btn_update_fw.grid(row=1, column=4, rowspan=2, padx=5, pady=5)
 
         # Row 3: Camera selection
         ttk.Label(olea_frame, text="Camera:").grid(row=3, column=0, padx=5, pady=(5, 0))
@@ -306,6 +321,8 @@ class CameraLEDController:
                                         font=('Consolas', 9), wrap=tk.WORD)
         self.device_info_text.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
         self.device_info_text.insert(tk.END, "Click 'Get Info' to\nretrieve device info")
+        self.device_info_text.tag_configure("warning", foreground="#f44336")
+        self.device_info_text.tag_configure("success", foreground="#4caf50")
 
         # Camera display
         camera_frame = ttk.LabelFrame(main_frame, text="Camera Feed", padding="5")
@@ -366,6 +383,146 @@ class CameraLEDController:
     def clear_serial_log(self):
         """Clear the serial traffic log"""
         self.serial_log.delete(1.0, tk.END)
+
+    def update_bundle(self):
+        """Download latest bundle and verify firmware. Runs in background on startup."""
+        self.root.after(0, lambda: self.status_var.set("Checking for bundle update..."))
+        try:
+            sb.ensure_artifact_dir()
+            bundle_id = sb.get_local_bundle_id()
+            result = sb.get_latest_bundle(bundle_id)
+            if result:
+                self.root.after(0, lambda: self._log_info("Bundle updated."))
+            else:
+                self.root.after(0, lambda: self._log_info("Bundle already up to date."))
+
+            # Verify firmware after bundle is in place
+            self.root.after(0, lambda: self.status_var.set("Verifying firmware..."))
+            fw_version, uf2_path = sb.verify_firmware()
+            self.led_fw_path = uf2_path
+            self.root.after(0, lambda: self.status_var.set(f"Ready  |  Head FW v{fw_version} OK"))
+            self.root.after(0, lambda: self._log_info(f"Firmware OK: led_control.uf2 v{fw_version}"))
+            self.root.after(0, lambda: self.btn_update_fw.config(state='normal'))
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"Startup error: {e}"))
+            self.root.after(0, lambda: self._log_info(f"Error: {e}"))
+
+    def flash_firmware(self):
+        """Flash led_control.uf2 to device via RP2 bootloader. Runs in background thread."""
+        import shutil
+        if not hasattr(self, 'led_fw_path') or not self.led_fw_path:
+            messagebox.showerror("Error", "Firmware file not available. Check bundle update.")
+            return
+
+        def _find_rp2_drive():
+            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                drive = f"{letter}:"
+                try:
+                    vol = ctypes.create_unicode_buffer(261)
+                    if ctypes.windll.kernel32.GetVolumeInformationW(
+                            f"{drive}\\", vol, 261, None, None, None, None, 0):
+                        if vol.value == "RPI-RP2":
+                            return drive
+                except Exception:
+                    pass
+            return None
+
+        def _run():
+            try:
+                self.root.after(0, lambda: self.btn_update_fw.config(state='disabled'))
+
+                # Step 1: power off
+                self.root.after(0, lambda: self.status_var.set("FW Update: powering off..."))
+                self.host_power_off()
+                time.sleep(2)
+
+                # Step 2: enter bootloader
+                self.root.after(0, lambda: self.status_var.set("FW Update: entering bootloader..."))
+                self.host_power_in_bootloader_mode()
+
+                # Step 3: wait for RPI-RP2 drive (10s timeout)
+                self.root.after(0, lambda: self.status_var.set("FW Update: waiting for RP2 drive..."))
+                rp2_drive = None
+                for _ in range(20):
+                    rp2_drive = _find_rp2_drive()
+                    if rp2_drive:
+                        break
+                    time.sleep(0.5)
+
+                if not rp2_drive:
+                    raise TimeoutError("RPI-RP2 drive not found within 10 seconds")
+
+                # Step 4: copy .uf2
+                self.root.after(0, lambda: self.status_var.set(f"FW Update: copying to {rp2_drive}..."))
+                shutil.copy2(self.led_fw_path, f"{rp2_drive}\\")
+
+                # Step 5: power on and wait for boot
+                time.sleep(1)
+                self.root.after(0, lambda: self.status_var.set("FW Update: powering on..."))
+                self.host_power_on()
+                time.sleep(4)
+
+                # Step 6: re-detect Olea Head (port may have changed after reboot), retry for 8s
+                self.root.after(0, lambda: self.status_var.set("FW Update: waiting for Olea Head..."))
+                self.olea_head_port = None
+                deadline = time.time() + 8
+                while time.time() < deadline:
+                    self.root.after(0, self.detect_olea_head)
+                    time.sleep(0.5)
+                    if self.olea_head_port:
+                        break
+
+                # Verify version via serial
+                self.root.after(0, lambda: self.status_var.set("FW Update: verifying..."))
+                if not self.olea_head_port:
+                    raise ValueError("Olea Head not found within 8 seconds after reboot")
+                conn = serial.Serial(port=self.olea_head_port, baudrate=115200, timeout=3)
+                conn.write(bytes([self.HEAD_CMD_DEVICE_INFO, 0x0]))
+                response = conn.read(ctypes.sizeof(device_info_t))
+                conn.close()
+
+                if len(response) < ctypes.sizeof(device_info_t):
+                    raise ValueError("No response from device after flash")
+
+                c_info = device_info_t.from_buffer_copy(response)
+                device_fw = f"{c_info.firmware_version_major}.{c_info.firmware_version_minor}.{c_info.firmware_version_patch}"
+                expected_fw = sb.get_head_fw_version()
+
+                # Display device info in UI before success/fail message
+                hw_ver = self.get_hardware_revision_str(c_info.hardware_version)
+                serial_num = f'{hex((c_info.serial_number_h << 64) | c_info.serial_number_l)[2:]}'
+                def _show_info(fw=device_fw, hw=hw_ver, sn=serial_num):
+                    self.device_info_text.delete(1.0, tk.END)
+                    self.device_info_text.insert(tk.END, f"Device: Olea_Head\n")
+                    self.device_info_text.insert(tk.END, f"Hardware Version: {hw}\n")
+                    self.device_info_text.insert(tk.END, f"Firmware Version: {fw}\n")
+                    self.device_info_text.insert(tk.END, f"Serial Number: {sn}\n")
+                self.root.after(0, _show_info)
+
+                if device_fw == expected_fw:
+                    self.root.after(0, lambda: self._fw_flash_success(device_fw))
+                else:
+                    raise ValueError(f"Version mismatch after flash: device={device_fw}, expected={expected_fw}")
+
+            except Exception as e:
+                err = str(e)
+                self.root.after(0, lambda: self.status_var.set(f"FW Update failed: {err}"))
+                self.root.after(0, lambda: self._log_info(f"FW Update failed: {err}"))
+                self.root.after(0, lambda: self.btn_update_fw.config(state='normal'))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _fw_flash_success(self, version):
+        self.status_var.set(f"Firmware update successful: v{version}")
+        self.device_info_text.insert(tk.END, f"\n✓ Update successful — v{version}\n", "success")
+        self.device_info_text.see(tk.END)
+        self.btn_update_fw.config(state='normal')
+
+    def _log_info(self, msg):
+        """Append a timestamped message to the device info text box."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.device_info_text.insert(tk.END, f"\n[{timestamp}] {msg}")
+        self.device_info_text.see(tk.END)
 
     def refresh_cameras(self):
         """Detect connected video devices using DirectShow via pygrabber"""
@@ -461,6 +618,25 @@ class CameraLEDController:
         except Exception:
             self.detect_host_controller()
             self.status_var.set("Power ON failed, re-detecting host controller")
+
+    def host_power_in_bootloader_mode(self):
+        """Send power on command to host controller"""
+        if not self.host_controller_conn or not self.host_controller_conn.is_open:
+            messagebox.showerror("Error", "Host controller not connected!")
+            return
+
+        try:
+            command = "#USB:1111,1111,0000,1111\n"
+            self.host_controller_conn.write(command.encode())
+            self.log_serial("HOST", "tx", command.strip())
+            # Read any response
+            response = self.host_controller_conn.readline()
+            if response:
+                self.log_serial("HOST", "rx", response.decode('utf-8', errors='replace').strip())
+            self.status_var.set("Host Controller: Power ON (Bootloader) sent")
+        except Exception:
+            self.detect_host_controller()
+            self.status_var.set("Power ON (Bootloader) failed, re-detecting host controller")
 
     def host_power_off(self):
         """Send power off command to host controller"""
@@ -723,6 +899,18 @@ class CameraLEDController:
                 self.device_info_text.insert(tk.END, f"Firmware Version: {device_info['firmware_version']}\n")
                 self.device_info_text.insert(tk.END, f"Serial Number: {device_info['serial_number']}\n")
 
+                # Compare firmware version against inventory
+                try:
+                    expected_fw = sb.get_head_fw_version()
+                    if device_info['firmware_version'] == expected_fw:
+                        self.device_info_text.insert(tk.END, f"\n✓ Firmware up to date (v{expected_fw})\n", "success")
+                    else:
+                        self.device_info_text.insert(tk.END,
+                            f"\n⚠ Firmware out of date — device: v{device_info['firmware_version']}, expected: v{expected_fw}\n"
+                            f"  → Update Now\n", "warning")
+                except Exception:
+                    pass  # Inventory not available yet (bundle not downloaded)
+
                 self.status_var.set(f"Device info retrieved: {device_info['device']}")
             else:
                 self.status_var.set("Olea Head: No response or incomplete data")
@@ -834,14 +1022,14 @@ class CameraLEDController:
         self.clarity_label.config(text="")
         self.test_all_sequence()
 
-    def test_log(self, message, status=None):
+    def test_log(self, message, status=None, tag=None):
         """Log a message to device info panel"""
         if status == "OK":
-            self.device_info_text.insert(tk.END, f"{message} ... OK\n")
+            self.device_info_text.insert(tk.END, f"{message} ... OK\n", tag or "")
         elif status == "FAIL":
-            self.device_info_text.insert(tk.END, f"{message} ... FAIL\n")
+            self.device_info_text.insert(tk.END, f"{message} ... FAIL\n", tag or "warning")
         else:
-            self.device_info_text.insert(tk.END, f"{message}\n")
+            self.device_info_text.insert(tk.END, f"{message}\n", tag or "")
         self.device_info_text.see(tk.END)
         self.root.update()
 
@@ -922,6 +1110,18 @@ class CameraLEDController:
                     self.test_log(f"    HW Version: {hw_version}")
                     self.test_log(f"    FW Version: {fw_version}")
                     self.test_log(f"    Serial: {serial_num}")
+
+                    # Firmware version check
+                    try:
+                        expected_fw = sb.get_head_fw_version()
+                        if fw_version != expected_fw:
+                            self.test_log(f"\n  ⚠ Firmware out of date — device: v{fw_version}, expected: v{expected_fw}", tag="warning")
+                            self.test_log("  Update firmware before running test. Use 'Update Firmware' button.", tag="warning")
+                            self.test_cleanup()
+                            return
+                        self.test_log(f"  Firmware version OK (v{fw_version})", "OK")
+                    except Exception:
+                        pass  # Inventory not available, skip check
                 else:
                     self.test_log("  No response from device", "FAIL")
                     self.test_cleanup()
@@ -1174,7 +1374,9 @@ def _check_update_background(root):
             return
         result = check_for_update()
         if result:
+            print("Update available!", result)
             new_version, download_url = result
+            print(f"Update available: v{new_version} at {download_url}")
             root.after(0, lambda: _prompt_update(root, new_version, download_url))
 
     threading.Thread(target=check, daemon=True).start()
