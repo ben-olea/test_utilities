@@ -15,7 +15,7 @@ from pygrabber.dshow_graph import FilterGraph
 from datetime import datetime
 import supabase as sb
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 GITHUB_REPO = "ben-olea/test_utilities"
 GITHUB_ASSET_NAME = "Olea_Head_Controller.exe"
 
@@ -429,16 +429,24 @@ class CameraLEDController:
 
         def _run():
             try:
+                # if initial flash, do not power in bootloader, find RP2 drive and copy uf2 file. Power cycle after copy and wait for device to come back up.
+                initial_flash = False
                 self.root.after(0, lambda: self.btn_update_fw.config(state='disabled'))
 
-                # Step 1: power off
-                self.root.after(0, lambda: self.status_var.set("FW Update: powering off..."))
-                self.host_power_off()
-                time.sleep(2)
+                # Check if RPI-RP2 is already present — skip power cycle if so
+                if _find_rp2_drive():
+                    self.root.after(0, lambda: self._log_info(f"FW Update: RP2 drive already present, skipping powering into bootloader step..."))
+                    initial_flash = True
+                    print("RP2 drive already present, skipping power cycle")
+                else:
+                    # Step 1: power off
+                    self.root.after(0, lambda: self.status_var.set("FW Update: powering off..."))
+                    self.host_power_off()
+                    time.sleep(2)
 
-                # Step 2: enter bootloader
-                self.root.after(0, lambda: self.status_var.set("FW Update: entering bootloader..."))
-                self.host_power_in_bootloader_mode()
+                    # Step 2: enter bootloader
+                    self.root.after(0, lambda: self.status_var.set("FW Update: entering bootloader..."))
+                    self.host_power_in_bootloader_mode()
 
                 # Step 3: wait for RPI-RP2 drive (10s timeout)
                 self.root.after(0, lambda: self.status_var.set("FW Update: waiting for RP2 drive..."))
@@ -454,28 +462,41 @@ class CameraLEDController:
 
                 # Step 4: copy .uf2
                 self.root.after(0, lambda: self.status_var.set(f"FW Update: copying to {rp2_drive}..."))
-                shutil.copy2(self.led_fw_path, f"{rp2_drive}\\")
+                shutil.copy(self.led_fw_path, f"{rp2_drive}\\")
+
+                # Step 4.5: wait for copy to complete and drive to disappear (device rebooting)
+                if initial_flash:
+                    self.root.after(0, lambda: self._log_info(f"FW Update: intial flash detected, wait and reboot..."))
+                    time.sleep(5)
+                    # power cycle to reboot into new firmware
+                    self.host_power_off()
+                    time.sleep(2)
 
                 # Step 5: power on and wait for boot
                 time.sleep(1)
                 self.root.after(0, lambda: self.status_var.set("FW Update: powering on..."))
                 self.host_power_on()
-                time.sleep(4)
+                time.sleep(5)
 
                 # Step 6: re-detect Olea Head (port may have changed after reboot), retry for 8s
                 self.root.after(0, lambda: self.status_var.set("FW Update: waiting for Olea Head..."))
+                self.root.after(0, lambda: self._log_info(f"FW Update: waiting for Olea Head..."))
                 self.olea_head_port = None
                 deadline = time.time() + 8
+                if(initial_flash):
+                    deadline = time.time() + 15  # Allow extra time for initial flash since it involves an extra reboot
+
                 while time.time() < deadline:
-                    self.root.after(0, self.detect_olea_head)
-                    time.sleep(0.5)
+                    self.detect_olea_head()
+                    time.sleep(1)
+                    print("head port: ", self.olea_head_port)
                     if self.olea_head_port:
                         break
 
                 # Verify version via serial
                 self.root.after(0, lambda: self.status_var.set("FW Update: verifying..."))
                 if not self.olea_head_port:
-                    raise ValueError("Olea Head not found within 8 seconds after reboot")
+                    raise ValueError("Olea Head not found after reboot")
                 conn = serial.Serial(port=self.olea_head_port, baudrate=115200, timeout=3)
                 conn.write(bytes([self.HEAD_CMD_DEVICE_INFO, 0x0]))
                 response = conn.read(ctypes.sizeof(device_info_t))
@@ -674,11 +695,11 @@ class CameraLEDController:
     def detect_olea_head(self):
         """Detect Olea Head by VID/PID and verify with get_info command"""
         self.olea_head_port = None
-
+        print("Detecting Olea Head...")
         # Search for all devices with matching VID/PID
         ports = serial.tools.list_ports.comports()
         matching_ports = [p for p in ports if p.vid == self.OLEA_HEAD_VID and p.pid == self.OLEA_HEAD_PID]
-
+        print(f"Found {len(matching_ports)} port(s) with VID:0x{self.OLEA_HEAD_VID:04X} PID:0x{self.OLEA_HEAD_PID:04X}")
         # Try each matching port and verify with get_info command
         for port in matching_ports:
             conn = None
@@ -702,8 +723,8 @@ class CameraLEDController:
 
                     print(f'Olea head found on port {port.device}')
                     # Got valid response - this is the correct port
-                    conn.close()
                     self.olea_head_port = port.device
+                    conn.close()
                     self.olea_status_label.config(text="Detected", foreground="#4caf50")
                     self.olea_device_label.config(text=f"{port.device} - {port.description}")
                     self.status_var.set(f"Olea Head detected on {port.device}")
@@ -715,15 +736,15 @@ class CameraLEDController:
                     self.btn_get_info.config(state='normal')
                     self.btn_led_bar.config(state='normal')
                     return
-            except Exception:
-                return False
+            except Exception as e:
+                print(f"Error testing port {port.device}: {e}")
             finally:
                 # Always close connection
                 if conn and conn.is_open:
                     try:
                         conn.close()
                     except Exception:
-                        False
+                        pass
 
         # Device not found - disable buttons
         self.olea_status_label.config(text="Not Detected", foreground="#f44336")
